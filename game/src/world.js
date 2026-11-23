@@ -1,124 +1,163 @@
-// The game's rules and state, with no drawing and no browser in it: the player's paddle, the
-// pool of falling blocks and coins, spawning, collisions, score, lives and level. step() advances
-// one fixed step and returns what happened as bit flags, so the caller can react without the
-// world knowing about screens or sound. Nothing here allocates after createWorld returns.
-import { BLOCK, COIN, FIELD, LEVEL, LIVES, PLAYER, POOL_SIZE } from './config.js';
+// The city of Solmar: a fixed grid of roads, blocks of buildings, a central park and a
+// beach with the sea along the south edge. Everything is generated from the seed, so the
+// same seed always builds the same city. This file owns the map and the collision queries;
+// it knows nothing about drawing or input.
 
-export const KIND_BLOCK = 0;
-export const KIND_COIN = 1;
+import { BEACH, PALETTE, PARK, ROADS, WORLD } from './config.js';
 
-export const EVENT_HIT = 1;
-export const EVENT_COIN = 2;
-export const EVENT_OVER = 4;
-
-function overlaps(a, b) {
-  return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+function roadRects() {
+  const rects = [];
+  for (const x of ROADS.vertical) rects.push({ x: x - ROADS.width / 2, y: 0, w: ROADS.width, h: BEACH.sandY });
+  for (const y of ROADS.horizontal) rects.push({ x: 0, y: y - ROADS.width / 2, w: WORLD.width, h: ROADS.width });
+  return rects;
 }
 
-export function createWorld(random) {
-  const player = { x: 0, y: FIELD.groundY - PLAYER.height, width: PLAYER.width, height: PLAYER.height, invulnerable: 0 };
-  const items = [];
-  for (let index = 0; index < POOL_SIZE; index += 1) {
-    items.push({ active: false, kind: KIND_BLOCK, x: 0, y: 0, width: 0, height: 0, speed: 0 });
-  }
-  const state = { player, items, score: 0, lives: LIVES, level: 1, elapsed: 0, blockTimer: 0, coinTimer: 0 };
+function onRoad(x, y) {
+  const half = ROADS.width / 2;
+  for (const rx of ROADS.vertical) if (Math.abs(x - rx) < half && y < BEACH.sandY) return true;
+  for (const ry of ROADS.horizontal) if (Math.abs(y - ry) < half) return true;
+  return false;
+}
 
-  function reset() {
-    player.x = (FIELD.width - player.width) / 2;
-    player.invulnerable = 0;
-    for (const item of items) item.active = false;
-    state.score = 0;
-    state.lives = LIVES;
-    state.level = 1;
-    state.elapsed = 0;
-    state.blockTimer = BLOCK.interval;
-    state.coinTimer = COIN.interval;
-  }
+function inPark(x, y) {
+  return x > PARK.x && x < PARK.x + PARK.width && y > PARK.y && y < PARK.y + PARK.height;
+}
 
-  function freeItem() {
-    for (let index = 0; index < items.length; index += 1) if (!items[index].active) return items[index];
-    return null;
-  }
+function inSea(x, y) {
+  return y >= BEACH.seaY;
+}
 
-  function spawnBlock() {
-    const item = freeItem();
-    if (item === null) return;
-    item.active = true;
-    item.kind = KIND_BLOCK;
-    item.width = BLOCK.minWidth + random() * (BLOCK.maxWidth - BLOCK.minWidth);
-    item.height = BLOCK.height;
-    item.x = random() * (FIELD.width - item.width);
-    item.y = -item.height;
-    item.speed = BLOCK.speed + BLOCK.speedPerLevel * (state.level - 1) + random() * BLOCK.speedJitter;
-  }
+function inSand(x, y) {
+  return y >= BEACH.sandY && y < BEACH.seaY;
+}
 
-  function spawnCoin() {
-    const item = freeItem();
-    if (item === null) return;
-    item.active = true;
-    item.kind = KIND_COIN;
-    item.width = COIN.size;
-    item.height = COIN.size;
-    item.x = random() * (FIELD.width - item.width);
-    item.y = -item.height;
-    item.speed = COIN.speed + COIN.speedPerLevel * (state.level - 1);
-  }
+function overlapsRect(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
 
-  function blockInterval() {
-    return Math.max(BLOCK.minInterval, BLOCK.interval * BLOCK.intervalScale ** (state.level - 1));
-  }
+export function createCity(random) {
+  const buildings = [];
+  const trees = [];
+  const roads = roadRects();
 
-  /**
-   * One fixed step. `direction` is -1, 0 or 1 (left, still, right). With `harmless` set (the title
-   * screen's backdrop) things fall but nothing touches the player and nothing scores.
-   */
-  function step(dt, direction, harmless) {
-    let events = 0;
-    state.elapsed += dt;
-    state.level = Math.min(LEVEL.max, 1 + Math.floor(state.elapsed / LEVEL.seconds));
-
-    player.x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * dt));
-    if (player.invulnerable > 0) player.invulnerable = Math.max(0, player.invulnerable - dt);
-
-    state.blockTimer -= dt;
-    if (state.blockTimer <= 0) {
-      spawnBlock();
-      state.blockTimer += blockInterval();
-    }
-    state.coinTimer -= dt;
-    if (state.coinTimer <= 0) {
-      spawnCoin();
-      state.coinTimer += COIN.interval + random() * COIN.intervalJitter;
-    }
-
-    for (let index = 0; index < items.length; index += 1) {
-      const item = items[index];
-      if (!item.active) continue;
-      item.y += item.speed * dt;
-      if (item.y > FIELD.groundY) {
-        item.active = false;
-        if (item.kind === KIND_BLOCK && !harmless) state.score += BLOCK.dodgePoints;
-        continue;
-      }
-      if (harmless || !overlaps(item, player)) continue;
-      if (item.kind === KIND_COIN) {
-        item.active = false;
-        state.score += COIN.points;
-        events |= EVENT_COIN;
-      } else if (player.invulnerable === 0) {
-        item.active = false;
-        state.lives -= 1;
-        player.invulnerable = PLAYER.invulnerable;
-        events |= EVENT_HIT;
-        if (state.lives === 0) {
-          events |= EVENT_OVER;
-          break;
+  // Buildings fill each block between roads, leaving a sidewalk margin around them.
+  const xs = [0, ...ROADS.vertical, WORLD.width];
+  const ys = [0, ...ROADS.horizontal, BEACH.sandY];
+  for (let bx = 0; bx < xs.length - 1; bx += 1) {
+    for (let by = 0; by < ys.length - 1; by += 1) {
+      const blockX = xs[bx] + ROADS.width / 2 + 26;
+      const blockY = ys[by] + ROADS.width / 2 + 26;
+      const blockW = xs[bx + 1] - ROADS.width / 2 - 26 - blockX;
+      const blockH = ys[by + 1] - ROADS.width / 2 - 26 - blockY;
+      if (blockW < 90 || blockH < 90) continue;
+      // The park block stays green.
+      if (overlapsRect({ x: blockX, y: blockY, w: blockW, h: blockH }, PARK)) continue;
+      const cols = Math.max(1, Math.floor(blockW / 190));
+      const rows = Math.max(1, Math.floor(blockH / 170));
+      const cellW = blockW / cols;
+      const cellH = blockH / rows;
+      for (let cx = 0; cx < cols; cx += 1) {
+        for (let cy = 0; cy < rows; cy += 1) {
+          if (random.chance(0.12)) continue; // an empty lot, for variety
+          const w = cellW * random.range(0.62, 0.85);
+          const h = cellH * random.range(0.62, 0.85);
+          const x = blockX + cx * cellW + (cellW - w) / 2;
+          const y = blockY + cy * cellH + (cellH - h) / 2;
+          buildings.push({
+            x, y, w, h,
+            roof: random.pick(PALETTE.buildingRoof),
+            floors: random.int(1, 4),
+            awning: random.chance(0.4),
+          });
         }
       }
     }
-    return events;
   }
 
-  reset();
-  return { state, reset, step };
+  // Trees line the park and dot the sidewalks.
+  for (let i = 0; i < 46; i += 1) {
+    trees.push({
+      x: PARK.x + random.range(30, PARK.width - 30),
+      y: PARK.y + random.range(30, PARK.height - 30),
+      r: random.range(13, 20),
+    });
+  }
+  for (let i = 0; i < 30; i += 1) {
+    const vertical = random.chance(0.5);
+    const x = vertical
+      ? random.pick(ROADS.vertical) + (random.chance(0.5) ? -1 : 1) * (ROADS.width / 2 + 22)
+      : random.range(80, WORLD.width - 80);
+    const y = vertical
+      ? random.range(80, BEACH.sandY - 80)
+      : random.pick(ROADS.horizontal) + (random.chance(0.5) ? -1 : 1) * (ROADS.width / 2 + 22);
+    if (inPark(x, y) || hitsBuilding(x, y, 20)) continue;
+    trees.push({ x, y, r: random.range(11, 16) });
+  }
+
+  function hitsBuilding(x, y, radius) {
+    for (const b of buildings) {
+      if (x + radius > b.x && x - radius < b.x + b.w && y + radius > b.y && y - radius < b.y + b.h) return b;
+    }
+    return null;
+  }
+
+  /** Push a circle out of buildings and the world edge; returns the building hit, if any. */
+  function collideCircle(pos, radius) {
+    let hit = null;
+    const b = hitsBuilding(pos.x, pos.y, radius);
+    if (b) {
+      hit = b;
+      const left = pos.x + radius - b.x;
+      const right = b.x + b.w - (pos.x - radius);
+      const top = pos.y + radius - b.y;
+      const bottom = b.y + b.h - (pos.y - radius);
+      const min = Math.min(left, right, top, bottom);
+      if (min === left) pos.x = b.x - radius;
+      else if (min === right) pos.x = b.x + b.w + radius;
+      else if (min === top) pos.y = b.y - radius;
+      else pos.y = b.y + b.h + radius;
+    }
+    pos.x = Math.max(radius + 8, Math.min(WORLD.width - radius - 8, pos.x));
+    pos.y = Math.max(radius + 8, Math.min(WORLD.height - radius - 8, pos.y));
+    return hit;
+  }
+
+  /** A random point on a sidewalk beside a road (used for pedestrian and parked-car spots). */
+  function sidewalkPoint() {
+    if (random.chance(0.5)) {
+      const x = random.pick(ROADS.vertical) + (random.chance(0.5) ? -1 : 1) * (ROADS.width / 2 + 24);
+      return { x, y: random.range(100, BEACH.sandY - 100) };
+    }
+    const y = random.pick(ROADS.horizontal) + (random.chance(0.5) ? -1 : 1) * (ROADS.width / 2 + 24);
+    return { x: random.range(100, WORLD.width - 100), y };
+  }
+
+  /** A random point on a road lane. */
+  function roadPoint() {
+    if (random.chance(0.5)) {
+      return { x: random.pick(ROADS.vertical) + (random.chance(0.5) ? -1 : 1) * ROADS.lane, y: random.range(100, BEACH.sandY - 100) };
+    }
+    return { x: random.range(100, WORLD.width - 100), y: random.pick(ROADS.horizontal) + (random.chance(0.5) ? -1 : 1) * ROADS.lane };
+  }
+
+  /** The nearest road centre line to a point, and whether it is vertical. */
+  function nearestRoad(x, y) {
+    let best = { vertical: true, line: ROADS.vertical[0], dist: Infinity };
+    for (const rx of ROADS.vertical) {
+      const d = Math.abs(x - rx);
+      if (d < best.dist) best = { vertical: true, line: rx, dist: d };
+    }
+    for (const ry of ROADS.horizontal) {
+      const d = Math.abs(y - ry);
+      if (d < best.dist) best = { vertical: false, line: ry, dist: d };
+    }
+    return best;
+  }
+
+  return {
+    buildings, trees, roads,
+    onRoad, inPark, inSea, inSand,
+    hitsBuilding, collideCircle,
+    sidewalkPoint, roadPoint, nearestRoad,
+  };
 }
